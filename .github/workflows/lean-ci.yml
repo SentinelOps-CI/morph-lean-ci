@@ -1,0 +1,135 @@
+name: Lean 4 CI on Morph Cloud
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      shards:
+        description: 'Number of shards to run'
+        required: false
+        default: '4'
+        type: choice
+        options:
+        - '4'
+        - '8'
+
+env:
+  PYTHON_VERSION: '3.11'
+  MORPH_PYTHON_VERSION: 'morphcloud'
+
+jobs:
+  build-snapshot:
+    runs-on: ubuntu-latest
+    outputs:
+      snapshot-id: ${{ steps.build.outputs.snapshot-id }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -U ${{ env.MORPH_PYTHON_VERSION }}
+          
+      - name: Build Lean 4 snapshot
+        id: build
+        env:
+          MORPH_API_KEY: ${{ secrets.MORPH_API_KEY }}
+        run: |
+          python scripts/build_snapshot.py
+          echo "snapshot-id=$(cat lean_snapshot_id.txt)" >> $GITHUB_OUTPUT
+          
+      - name: Upload snapshot ID
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-id
+          path: lean_snapshot_id.txt
+
+  test-shards:
+    needs: build-snapshot
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: ${{ fromJson(format('[0,1,2,3,4,5,6,7]')) }}
+        shards: ${{ fromJson(format('[{0}]', github.event.inputs.shards || '4')) }}
+      # Only run the number of shards requested
+      max-parallel: ${{ github.event.inputs.shards || 4 }}
+      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Download snapshot ID
+        uses: actions/download-artifact@v4
+        with:
+          name: snapshot-id
+          path: .
+          
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -U ${{ env.MORPH_PYTHON_VERSION }}
+          
+      - name: Run shard ${{ matrix.shard }}
+        env:
+          MORPH_API_KEY: ${{ secrets.MORPH_API_KEY }}
+        run: |
+          python scripts/run_shard.py \
+            --shard ${{ matrix.shard }} \
+            --shards ${{ matrix.shards }}
+            
+      - name: Upload shard logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-shard-${{ matrix.shard }}
+          path: out/logs/
+          
+      - name: Upload test output
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-shard-${{ matrix.shard }}
+          path: out/logs/${{ matrix.shard }}_test_output.log
+          if-no-files-found: ignore
+
+  summary:
+    needs: test-shards
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download all logs
+        uses: actions/download-artifact@v4
+        with:
+          path: logs/
+          
+      - name: Generate summary
+        run: |
+          echo "## Lean 4 CI Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Snapshot ID:** $(cat logs/snapshot-id/lean_snapshot_id.txt)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Shard Results:**" >> $GITHUB_STEP_SUMMARY
+          
+          for log in logs/logs-shard-*/**/*.log; do
+            if [ -f "$log" ]; then
+              shard_num=$(basename "$log" .log)
+              echo "- **Shard $shard_num:** ✅ Completed" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Performance Targets:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Cold Start: ≤ p95 60s across ${{ github.event.inputs.shards || 4 }} shards" >> $GITHUB_STEP_SUMMARY
+          echo "- Warm Cache: ≤ p95 20s across ${{ github.event.inputs.shards || 4 }} shards" >> $GITHUB_STEP_SUMMARY
