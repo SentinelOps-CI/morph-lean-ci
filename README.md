@@ -1,6 +1,12 @@
+<div align="center">
+
 # Lean 4 CI on Morph Cloud
 
 A minimal, reusable CI template for running Lean 4 proofs on Morph Cloud's Infinibranch with intelligent caching and sharding.
+
+</div>
+
+---
 
 ## Quickstart
 
